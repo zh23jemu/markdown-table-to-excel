@@ -15,6 +15,10 @@ from openpyxl.utils import get_column_letter
 SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
 BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 AGE_TOKEN_RE = re.compile(r"^(?:約)?[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]+(?:歲|月|日|具)?$")
+AGE_PREFIX_RE = re.compile(r"^((?:約)?(?:[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]*歲|[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]+(?:月|日|具)))(.+)$")
+DATE_LIKE_RE = re.compile(r"[一二三四五六七八九十廿卅卌元\d]+月|[一二三四五六七八九十廿卅卌元\d]+日|又月又日|初[一二三四五六七八九十\d]")
+ADDRESS_KEYWORDS = ("方便所", "福音堂", "福音医院", "福音醫院", "醫院", "医院", "街", "里", "巷", "路", "橋", "桥", "碼頭", "码头", "祠", "院", "棧", "栈", "埠頭", "碼頭水")
+ORIGIN_SUFFIXES = ("縣", "县", "州", "鄉", "乡", "埠", "門", "门", "海", "浦", "寧", "宁", "甯", "陽", "阳", "溪", "島", "岛", "山", "岡", "冈", "口")
 
 
 @dataclass
@@ -171,17 +175,154 @@ def is_age_like(value: str) -> bool:
     return bool(AGE_TOKEN_RE.fullmatch(stripped))
 
 
+def split_age_and_origin(age_value: str) -> tuple[str, str] | None:
+    stripped = age_value.strip()
+    if not stripped:
+        return None
+
+    match = AGE_PREFIX_RE.fullmatch(stripped)
+    if not match:
+        return None
+
+    age_part = match.group(1).strip()
+    origin_part = match.group(2).strip()
+    if not age_part or not origin_part:
+        return None
+
+    return age_part, origin_part
+
+
+def is_date_like(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return bool(DATE_LIKE_RE.search(stripped))
+
+
+def is_origin_like(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if any(keyword in stripped for keyword in ADDRESS_KEYWORDS):
+        return False
+    return stripped.endswith(ORIGIN_SUFFIXES)
+
+
+def is_address_like(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return any(keyword in stripped for keyword in ADDRESS_KEYWORDS)
+
+
+def shift_misaligned_identity_block(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+    family_index = find_header_index(headers, ("認家", "认家"))
+    death_index = find_header_index(headers, ("死亡日期",))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index, illness_index, family_index, death_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    illness_value = normalized_row[illness_index].strip()
+    family_value = normalized_row[family_index].strip()
+    death_value = normalized_row[death_index].strip()
+
+    if gender_value not in {"歲", "岁"}:
+        return normalized_row
+    if is_age_like(age_value):
+        return normalized_row
+    if not age_value:
+        return normalized_row
+    if address_value:
+        return normalized_row
+    if not family_value or not is_date_like(family_value):
+        return normalized_row
+    if death_value and is_date_like(death_value):
+        return normalized_row
+
+    shifted_row = normalized_row[:]
+    shifted_row[death_index] = family_value
+    shifted_row[family_index] = illness_value
+    shifted_row[illness_index] = address_value
+    shifted_row[address_index] = origin_value
+    shifted_row[origin_index] = age_value
+    shifted_row[age_index] = gender_value
+    shifted_row[gender_index] = ""
+    return shifted_row
+
+
+def shift_place_fields_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+
+    required_indexes = (age_index, origin_index, address_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    original_origin_value = origin_value
+
+    age_and_origin = split_age_and_origin(age_value)
+    if age_and_origin and not is_address_like(age_and_origin[1]) and not address_value:
+        normalized_row[age_index] = age_and_origin[0]
+        normalized_row[origin_index] = age_and_origin[1]
+        if is_address_like(original_origin_value):
+            normalized_row[address_index] = original_origin_value
+        age_value = normalized_row[age_index].strip()
+        origin_value = normalized_row[origin_index].strip()
+        address_value = normalized_row[address_index].strip()
+
+    if address_value:
+        return normalized_row
+    if not origin_value:
+        return normalized_row
+    if is_origin_like(origin_value):
+        return normalized_row
+    if not is_address_like(origin_value):
+        return normalized_row
+    if age_value and not is_age_like(age_value):
+        return normalized_row
+
+    moved_row = normalized_row[:]
+    moved_row[address_index] = origin_value
+    return moved_row
+
+
 def normalize_identity_columns(headers: list[str], row: list[str]) -> list[str]:
     normalized_row = row[:]
     name_index = find_header_index(headers, ("姓名", "名別", "名字"))
     gender_index = find_header_index(headers, ("性別", "性"))
     age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
 
     if name_index is None or gender_index is None:
         return normalized_row
 
-    if max(name_index, gender_index, age_index or 0) >= len(normalized_row):
-        normalized_row.extend([""] * (max(name_index, gender_index, age_index or 0) + 1 - len(normalized_row)))
+    max_index = max(index for index in (name_index, gender_index, age_index, origin_index) if index is not None)
+    if max_index >= len(normalized_row):
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
 
     name_value = normalized_row[name_index].strip()
     gender_value = normalized_row[gender_index].strip()
@@ -214,6 +355,13 @@ def normalize_identity_columns(headers: list[str], row: list[str]) -> list[str]:
             normalized_row[name_index] = name_value[:-1].strip()
             normalized_row[gender_index] = name_value[-1]
 
+    if age_index is not None and origin_index is not None:
+        age_value = normalized_row[age_index].strip()
+        origin_value = normalized_row[origin_index].strip()
+        age_and_origin = split_age_and_origin(age_value)
+        if age_and_origin and not origin_value:
+            normalized_row[age_index], normalized_row[origin_index] = age_and_origin
+
     return normalized_row
 
 
@@ -223,6 +371,8 @@ def normalize_row_break_separators(headers: list[str], rows: list[list[str]]) ->
     for row in rows:
         normalized_row = split_br_delimited_cells(row, expected_width)
         normalized_row = normalize_identity_columns(headers, normalized_row)
+        normalized_row = shift_misaligned_identity_block(headers, normalized_row)
+        normalized_row = shift_place_fields_right(headers, normalized_row)
         normalized_rows.append(normalized_row)
     return normalized_rows
 
