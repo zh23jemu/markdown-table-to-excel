@@ -13,6 +13,7 @@ from openpyxl.utils import get_column_letter
 
 
 SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
+BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
 @dataclass
@@ -117,6 +118,44 @@ def parse_markdown_tables(path: str | Path) -> list[TableBlock]:
     return tables
 
 
+def split_br_delimited_cells(row: list[str], expected_width: int) -> list[str]:
+    normalized_row = row + [""] * (expected_width - len(row))
+    column_index = 0
+
+    while column_index < expected_width:
+        cell_value = normalized_row[column_index].strip()
+        if "<br" not in cell_value.lower():
+            column_index += 1
+            continue
+
+        segments = [segment.strip() for segment in BR_TAG_RE.split(cell_value)]
+        if len(segments) <= 1 or any(not segment for segment in segments):
+            column_index += 1
+            continue
+
+        right_empty_slots = 0
+        probe_index = column_index + 1
+        while probe_index < expected_width and not normalized_row[probe_index].strip():
+            right_empty_slots += 1
+            probe_index += 1
+
+        if len(segments) != right_empty_slots + 1:
+            column_index += 1
+            continue
+
+        for offset, segment in enumerate(segments):
+            normalized_row[column_index + offset] = segment
+
+        column_index += len(segments)
+
+    return normalized_row
+
+
+def normalize_row_break_separators(headers: list[str], rows: list[list[str]]) -> list[list[str]]:
+    expected_width = len(headers)
+    return [split_br_delimited_cells(row, expected_width) for row in rows]
+
+
 def sanitize_sheet_name(name: str, used_names: set[str]) -> str:
     cleaned = re.sub(r'[\\/*?:\[\]]', "_", name).strip() or "Sheet"
     cleaned = cleaned[:31]
@@ -193,6 +232,7 @@ def export_tables_to_workbook(parsed_files: list[tuple[Path, list[TableBlock]]],
 
         current_row = 1
         for table in tables:
+            table.rows = normalize_row_break_separators(table.headers, table.rows)
             current_row = write_table_to_sheet(worksheet, current_row, table)
 
         auto_adjust_columns(worksheet)
