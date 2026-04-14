@@ -20,6 +20,7 @@ AGE_TOKEN_RE = re.compile(r"^(?:約)?[零一二三四五六七八九十百千廿
 @dataclass
 class TableBlock:
     title: str
+    table_number: int
     headers: list[str]
     rows: list[list[str]]
 
@@ -98,6 +99,7 @@ def parse_markdown_tables(path: str | Path) -> list[TableBlock]:
             tables.append(
                 TableBlock(
                     title=title or file_path.stem,
+                    table_number=len(tables) + 1,
                     headers=headers,
                     rows=rows,
                 )
@@ -269,7 +271,11 @@ def write_table_to_sheet(worksheet, start_row: int, table: TableBlock) -> int:
             cell.alignment = Alignment(vertical="top", wrap_text=False)
         current_row += 1
 
-    return current_row + 2
+    worksheet.cell(row=current_row, column=1, value=f"表格编号：{table.table_number}")
+    worksheet.cell(row=current_row, column=1).font = Font(italic=True)
+    current_row += 1
+
+    return current_row + 4
 
 
 def auto_adjust_columns(worksheet) -> None:
@@ -305,8 +311,6 @@ def export_tables_to_workbook(parsed_files: list[tuple[Path, list[TableBlock]]],
             current_row = write_table_to_sheet(worksheet, current_row, table)
 
         auto_adjust_columns(worksheet)
-        worksheet.freeze_panes = "A2"
-
     workbook.save(output_path)
     return str(output_path)
 
