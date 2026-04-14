@@ -14,6 +14,7 @@ from openpyxl.utils import get_column_letter
 
 SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
 BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
+AGE_TOKEN_RE = re.compile(r"^(?:約)?[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]+(?:歲|月|日|具)?$")
 
 
 @dataclass
@@ -151,9 +152,77 @@ def split_br_delimited_cells(row: list[str], expected_width: int) -> list[str]:
     return normalized_row
 
 
+def find_header_index(headers: list[str], candidates: tuple[str, ...]) -> int | None:
+    for index, header in enumerate(headers):
+        normalized_header = header.replace(" ", "")
+        if any(candidate in normalized_header for candidate in candidates):
+            return index
+    return None
+
+
+def is_age_like(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if "白骨" in stripped:
+        return True
+    return bool(AGE_TOKEN_RE.fullmatch(stripped))
+
+
+def normalize_identity_columns(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    name_index = find_header_index(headers, ("姓名", "名別", "名字"))
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+
+    if name_index is None or gender_index is None:
+        return normalized_row
+
+    if max(name_index, gender_index, age_index or 0) >= len(normalized_row):
+        normalized_row.extend([""] * (max(name_index, gender_index, age_index or 0) + 1 - len(normalized_row)))
+
+    name_value = normalized_row[name_index].strip()
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip() if age_index is not None else ""
+
+    has_gender_suffix = name_value.endswith(("男", "女")) and len(name_value) > 1
+
+    if not gender_value and has_gender_suffix:
+        normalized_row[name_index] = name_value[:-1].strip()
+        normalized_row[gender_index] = name_value[-1]
+        name_value = normalized_row[name_index]
+        gender_value = normalized_row[gender_index]
+
+    if age_index is not None:
+        if has_gender_suffix and is_age_like(gender_value) and not age_value:
+            normalized_row[name_index] = name_value[:-1].strip()
+            normalized_row[gender_index] = name_value[-1]
+            normalized_row[age_index] = gender_value
+            name_value = normalized_row[name_index]
+            gender_value = normalized_row[gender_index]
+            age_value = normalized_row[age_index]
+
+        if not age_value and is_age_like(gender_value):
+            normalized_row[age_index] = gender_value
+            normalized_row[gender_index] = ""
+            age_value = normalized_row[age_index]
+            gender_value = normalized_row[gender_index]
+
+        if not gender_value and name_value.endswith(("男", "女")) and len(name_value) > 1:
+            normalized_row[name_index] = name_value[:-1].strip()
+            normalized_row[gender_index] = name_value[-1]
+
+    return normalized_row
+
+
 def normalize_row_break_separators(headers: list[str], rows: list[list[str]]) -> list[list[str]]:
     expected_width = len(headers)
-    return [split_br_delimited_cells(row, expected_width) for row in rows]
+    normalized_rows: list[list[str]] = []
+    for row in rows:
+        normalized_row = split_br_delimited_cells(row, expected_width)
+        normalized_row = normalize_identity_columns(headers, normalized_row)
+        normalized_rows.append(normalized_row)
+    return normalized_rows
 
 
 def sanitize_sheet_name(name: str, used_names: set[str]) -> str:
