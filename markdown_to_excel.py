@@ -13,7 +13,6 @@ from openpyxl.utils import get_column_letter
 
 
 SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$")
-BR_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 
 
 @dataclass
@@ -24,7 +23,6 @@ class TableBlock:
 
 
 def normalize_cell(text: str) -> str:
-    text = BR_RE.sub("\n", text)
     text = re.sub(r"\*\*(.*?)\*\*", r"\1", text)
     text = re.sub(r"\*(.*?)\*", r"\1", text)
     text = re.sub(r"__(.*?)__", r"\1", text)
@@ -153,14 +151,14 @@ def write_table_to_sheet(worksheet, start_row: int, table: TableBlock) -> int:
     for column_index, header in enumerate(table.headers, start=1):
         cell = worksheet.cell(row=current_row, column=column_index, value=header)
         cell.font = Font(bold=True)
-        cell.alignment = Alignment(vertical="top", wrap_text=True)
+        cell.alignment = Alignment(vertical="top", wrap_text=False)
     current_row += 1
 
     for row in table.rows:
         padded_row = row + [""] * (len(table.headers) - len(row))
         for column_index, value in enumerate(padded_row, start=1):
             cell = worksheet.cell(row=current_row, column=column_index, value=value)
-            cell.alignment = Alignment(vertical="top", wrap_text=True)
+            cell.alignment = Alignment(vertical="top", wrap_text=False)
         current_row += 1
 
     return current_row + 2
@@ -173,8 +171,7 @@ def auto_adjust_columns(worksheet) -> None:
         for cell in column_cells:
             if cell.value is None:
                 continue
-            lines = str(cell.value).splitlines() or [str(cell.value)]
-            max_length = max(max_length, *(len(line) for line in lines))
+            max_length = max(max_length, len(str(cell.value)))
         worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 40)
 
 

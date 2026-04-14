@@ -3,4 +3,4 @@ __pycache__/
 *.pyc
 
 markdown_tables.xlsx
-markdown_tables_*.xlsx
+*markdown_tables_*.xlsx
