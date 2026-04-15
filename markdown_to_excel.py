@@ -1306,6 +1306,11 @@ def run_desktop_ui() -> int:
     import tkinter as tk
     import tkinter.font as tkfont
     from tkinter import filedialog, messagebox, ttk
+    try:
+        from tkinterdnd2 import DND_FILES, TkinterDnD
+    except ImportError:
+        DND_FILES = None
+        TkinterDnD = None
 
     project_dir = get_application_dir()
     selected_files: list[str] = []
@@ -1325,18 +1330,45 @@ def run_desktop_ui() -> int:
         if selected_files:
             file_tip_var.set("双击列表项可打开文件所在位置。")
         else:
-            file_tip_var.set("请选择一个或多个 Markdown 文件。")
+            if DND_FILES:
+                file_tip_var.set("请选择文件，或直接拖拽 Markdown 文件到列表区域。")
+            else:
+                file_tip_var.set("请选择一个或多个 Markdown 文件。")
+
+    def add_file_paths(file_paths: Iterable[str | Path]) -> None:
+        added_count = 0
+        ignored_count = 0
+        for file_path in file_paths:
+            raw_path = str(file_path).strip()
+            if not raw_path:
+                continue
+            resolved_path = Path(raw_path).expanduser().resolve()
+            if resolved_path.suffix.lower() != ".md":
+                ignored_count += 1
+                continue
+            resolved = str(resolved_path)
+            if resolved not in selected_files:
+                selected_files.append(resolved)
+                added_count += 1
+
+        refresh_file_list()
+        if added_count:
+            status_var.set(f"已添加 {added_count} 个 Markdown 文件")
+        elif ignored_count:
+            status_var.set("已忽略非 Markdown 文件")
+
+    def handle_drop(event) -> None:
+        if not DND_FILES:
+            return
+        dropped_files = root.tk.splitlist(event.data)
+        add_file_paths(dropped_files)
 
     def add_files() -> None:
         file_paths = filedialog.askopenfilenames(
             title="选择要导出的 Markdown 文件",
             filetypes=[("Markdown 文件", "*.md"), ("所有文件", "*.*")],
         )
-        for file_path in file_paths:
-            resolved = str(Path(file_path).resolve())
-            if resolved not in selected_files:
-                selected_files.append(resolved)
-        refresh_file_list()
+        add_file_paths(file_paths)
 
     def remove_selected_files() -> None:
         selected_indexes = list(file_listbox.curselection())
@@ -1397,7 +1429,7 @@ def run_desktop_ui() -> int:
         finally:
             export_button.config(state=tk.NORMAL)
 
-    root = tk.Tk()
+    root = TkinterDnD.Tk() if TkinterDnD else tk.Tk()
     root.title("Markdown 表格批量导出 Excel")
     root.geometry("980x640")
     root.minsize(820, 520)
@@ -1501,6 +1533,11 @@ def run_desktop_ui() -> int:
     )
     file_listbox.grid(row=0, column=0, sticky="nsew")
     file_listbox.bind("<Double-Button-1>", reveal_selected_file)
+    if DND_FILES:
+        file_listbox.drop_target_register(DND_FILES)
+        file_listbox.dnd_bind("<<Drop>>", handle_drop)
+        list_frame.drop_target_register(DND_FILES)
+        list_frame.dnd_bind("<<Drop>>", handle_drop)
 
     scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=file_listbox.yview)
     scrollbar.grid(row=0, column=1, sticky="ns")

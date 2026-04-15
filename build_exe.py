@@ -27,6 +27,8 @@ def main() -> int:
         "--clean",
         "--windowed",
         "--onefile",
+        "--hidden-import",
+        "tkinterdnd2",
         "--name",
         "Markdown表格导出工具",
         str(project_dir / "markdown_to_excel.py"),
