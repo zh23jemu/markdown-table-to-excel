@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -1267,6 +1268,277 @@ def select_markdown_files() -> list[str]:
     return list(file_paths)
 
 
+def run_desktop_ui() -> int:
+    import tkinter as tk
+    import tkinter.font as tkfont
+    from tkinter import filedialog, messagebox, ttk
+
+    project_dir = Path(__file__).resolve().parent
+    selected_files: list[str] = []
+    last_output_path: Path | None = None
+
+    def get_export_dir() -> Path:
+        return Path(output_dir_var.get()).resolve() if output_dir_var.get().strip() else project_dir
+
+    def update_output_hint() -> None:
+        export_dir_var.set(str(get_export_dir()))
+
+    def refresh_file_list() -> None:
+        file_listbox.delete(0, tk.END)
+        for file_path in selected_files:
+            file_listbox.insert(tk.END, file_path)
+        count_var.set(f"已选择 {len(selected_files)} 个 Markdown 文件")
+        if selected_files:
+            file_tip_var.set("双击列表项可打开文件所在位置。")
+        else:
+            file_tip_var.set("请选择一个或多个 Markdown 文件。")
+
+    def add_files() -> None:
+        file_paths = filedialog.askopenfilenames(
+            title="选择要导出的 Markdown 文件",
+            filetypes=[("Markdown 文件", "*.md"), ("所有文件", "*.*")],
+        )
+        for file_path in file_paths:
+            resolved = str(Path(file_path).resolve())
+            if resolved not in selected_files:
+                selected_files.append(resolved)
+        refresh_file_list()
+
+    def remove_selected_files() -> None:
+        selected_indexes = list(file_listbox.curselection())
+        if not selected_indexes:
+            return
+        for index in reversed(selected_indexes):
+            selected_files.pop(index)
+        refresh_file_list()
+
+    def clear_files() -> None:
+        selected_files.clear()
+        refresh_file_list()
+
+    def choose_output_dir() -> None:
+        selected_dir = filedialog.askdirectory(title="选择导出目录")
+        if selected_dir:
+            resolved_dir = str(Path(selected_dir).resolve())
+            output_dir_var.set(resolved_dir)
+            update_output_hint()
+
+    def reset_output_dir() -> None:
+        output_dir_var.set("")
+        update_output_hint()
+
+    def open_export_dir() -> None:
+        export_dir = get_export_dir()
+        export_dir.mkdir(parents=True, exist_ok=True)
+        os.startfile(str(export_dir))
+
+    def reveal_selected_file(_event=None) -> None:
+        selected_indexes = list(file_listbox.curselection())
+        if not selected_indexes:
+            return
+        selected_path = Path(selected_files[selected_indexes[0]])
+        if selected_path.exists():
+            os.startfile(str(selected_path.parent))
+
+    def export_selected_files() -> None:
+        nonlocal last_output_path
+        if not selected_files:
+            messagebox.showwarning("未选择文件", "请先添加至少一个 Markdown 文件。")
+            return
+
+        export_button.config(state=tk.DISABLED)
+        root.update_idletasks()
+
+        try:
+            parsed_files: list[tuple[Path, list[TableBlock]]] = []
+            for file_name in selected_files:
+                file_path = Path(file_name)
+                parsed_files.append((file_path, parse_markdown_tables(file_path)))
+
+            export_dir = get_export_dir()
+            output_path = build_output_path(export_dir)
+            result = export_tables_to_workbook(parsed_files, output_path)
+            last_output_path = Path(result)
+            status_var.set(f"导出完成：{result}")
+            latest_file_var.set(f"最近导出：{result}")
+            if auto_open_var.get() and last_output_path.exists():
+                os.startfile(str(last_output_path))
+            messagebox.showinfo("导出完成", f"Excel 文件已生成：\n{result}")
+        except Exception as exc:
+            status_var.set(f"导出失败：{exc}")
+            messagebox.showerror("导出失败", str(exc))
+        finally:
+            export_button.config(state=tk.NORMAL)
+
+    root = tk.Tk()
+    root.title("Markdown 表格批量导出 Excel")
+    root.geometry("980x640")
+    root.minsize(820, 520)
+    root.configure(bg="#f6f1e8")
+
+    title_font = tkfont.Font(size=18, weight="bold")
+    subtitle_font = tkfont.Font(size=10)
+    section_font = tkfont.Font(size=10, weight="bold")
+    button_font = tkfont.Font(size=10, weight="bold")
+
+    style = ttk.Style(root)
+    try:
+        style.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    style.configure("App.TFrame", background="#f6f1e8")
+    style.configure("Card.TFrame", background="#fffaf2", relief="flat")
+    style.configure("HeaderTitle.TLabel", background="#f6f1e8", foreground="#2b2218", font=title_font)
+    style.configure("HeaderSub.TLabel", background="#f6f1e8", foreground="#6d5841", font=subtitle_font)
+    style.configure("Section.TLabelframe", background="#fffaf2", borderwidth=1, relief="solid")
+    style.configure("Section.TLabelframe.Label", background="#fffaf2", foreground="#5d4732", font=section_font)
+    style.configure("Body.TLabel", background="#fffaf2", foreground="#433326")
+    style.configure("Hint.TLabel", background="#fffaf2", foreground="#7b6853")
+    style.configure("Status.TLabel", background="#efe4d4", foreground="#4a3928")
+    style.configure("Footer.TLabel", background="#f6f1e8", foreground="#8a735d", font=subtitle_font)
+    style.configure("Preview.TLabel", background="#fffaf2", foreground="#8d6f4f")
+    style.configure("Primary.TButton", font=button_font, padding=(14, 8))
+    style.configure("Secondary.TButton", padding=(10, 7))
+    style.configure("Path.TEntry", fieldbackground="#fffdf8", padding=6)
+
+    count_var = tk.StringVar(value="已选择 0 个 Markdown 文件")
+    output_dir_var = tk.StringVar(value="")
+    export_dir_var = tk.StringVar(value=str(project_dir))
+    latest_file_var = tk.StringVar(value="最近导出：尚未导出文件")
+    file_tip_var = tk.StringVar(value="请选择一个或多个 Markdown 文件。")
+    status_var = tk.StringVar(value="准备就绪")
+    auto_open_var = tk.BooleanVar(value=False)
+
+    main_frame = ttk.Frame(root, padding=16, style="App.TFrame")
+    main_frame.pack(fill=tk.BOTH, expand=True)
+    main_frame.columnconfigure(0, weight=1)
+    main_frame.rowconfigure(2, weight=1)
+
+    header_frame = ttk.Frame(main_frame, style="App.TFrame")
+    header_frame.grid(row=0, column=0, sticky="ew")
+    header_frame.columnconfigure(0, weight=1)
+
+    header_label = ttk.Label(header_frame, text="Markdown 表格批量导出 Excel", style="HeaderTitle.TLabel")
+    header_label.grid(row=0, column=0, sticky="w")
+
+    subtitle_label = ttk.Label(
+        header_frame,
+        text="支持批量导入 Markdown，自动解析表格并导出到同一个 Excel 工作簿。",
+        style="HeaderSub.TLabel",
+    )
+    subtitle_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+    top_actions = ttk.Frame(main_frame, style="App.TFrame")
+    top_actions.grid(row=1, column=0, sticky="ew", pady=(14, 10))
+    top_actions.columnconfigure(0, weight=1)
+
+    add_top_button = ttk.Button(top_actions, text="导入 Markdown 文件", command=add_files, style="Primary.TButton")
+    add_top_button.grid(row=0, column=0, sticky="w")
+
+    content_frame = ttk.Frame(main_frame, style="App.TFrame")
+    content_frame.grid(row=2, column=0, sticky="nsew")
+    content_frame.columnconfigure(0, weight=1)
+    content_frame.rowconfigure(0, weight=1)
+
+    file_frame = ttk.LabelFrame(content_frame, text="文件列表", padding=12, style="Section.TLabelframe")
+    file_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+    file_frame.columnconfigure(0, weight=1)
+    file_frame.rowconfigure(1, weight=1)
+
+    count_label = ttk.Label(file_frame, textvariable=count_var, style="Body.TLabel")
+    count_label.grid(row=0, column=0, sticky="w", pady=(0, 8))
+
+    file_tip_label = ttk.Label(file_frame, textvariable=file_tip_var, style="Hint.TLabel")
+    file_tip_label.grid(row=0, column=1, sticky="e", pady=(0, 8))
+
+    list_frame = ttk.Frame(file_frame, style="Card.TFrame")
+    list_frame.grid(row=1, column=0, columnspan=2, sticky="nsew")
+    list_frame.columnconfigure(0, weight=1)
+    list_frame.rowconfigure(0, weight=1)
+
+    file_listbox = tk.Listbox(
+        list_frame,
+        selectmode=tk.EXTENDED,
+        height=15,
+        bd=0,
+        highlightthickness=1,
+        highlightbackground="#d9c7b0",
+        highlightcolor="#c18b47",
+        bg="#fffdf9",
+        fg="#2d251d",
+        selectbackground="#d8b27a",
+        selectforeground="#1f1812",
+        activestyle="none",
+        font=("", 10),
+        relief=tk.FLAT,
+    )
+    file_listbox.grid(row=0, column=0, sticky="nsew")
+    file_listbox.bind("<Double-Button-1>", reveal_selected_file)
+
+    scrollbar = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=file_listbox.yview)
+    scrollbar.grid(row=0, column=1, sticky="ns")
+    file_listbox.config(yscrollcommand=scrollbar.set)
+
+    button_frame = ttk.Frame(file_frame, style="Card.TFrame")
+    button_frame.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+
+    ttk.Button(button_frame, text="继续添加文件", command=add_files, style="Secondary.TButton").pack(side=tk.LEFT)
+    ttk.Button(button_frame, text="移除选中", command=remove_selected_files, style="Secondary.TButton").pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(button_frame, text="清空列表", command=clear_files, style="Secondary.TButton").pack(side=tk.LEFT, padx=(8, 0))
+
+    export_dir_frame = ttk.LabelFrame(content_frame, text="导出设置", padding=12, style="Section.TLabelframe")
+    export_dir_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+    export_dir_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(export_dir_frame, text="导出目录", style="Body.TLabel").grid(row=0, column=0, sticky="w", padx=(0, 10))
+
+    export_dir_label = ttk.Label(export_dir_frame, textvariable=export_dir_var, style="Preview.TLabel")
+    export_dir_label.grid(row=0, column=1, sticky="ew")
+
+    ttk.Button(export_dir_frame, text="选择目录", command=choose_output_dir, style="Secondary.TButton").grid(row=0, column=2, padx=(8, 0))
+    ttk.Button(export_dir_frame, text="使用默认目录", command=reset_output_dir, style="Secondary.TButton").grid(row=0, column=3, padx=(8, 0))
+
+    auto_open_check = ttk.Checkbutton(
+        export_dir_frame,
+        text="导出完成后自动打开 Excel 文件",
+        variable=auto_open_var,
+    )
+    auto_open_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
+
+    action_frame = ttk.Frame(main_frame, padding=(12, 10), style="Card.TFrame")
+    action_frame.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+    action_frame.columnconfigure(0, weight=1)
+
+    status_label = ttk.Label(action_frame, textvariable=status_var, style="Status.TLabel")
+    status_label.grid(row=0, column=0, sticky="w")
+
+    latest_label = ttk.Label(action_frame, textvariable=latest_file_var, style="Hint.TLabel")
+    latest_label.grid(row=1, column=0, sticky="w", pady=(8, 0))
+
+    action_buttons = ttk.Frame(action_frame, style="Card.TFrame")
+    action_buttons.grid(row=0, column=1, rowspan=2, sticky="e")
+
+    ttk.Button(action_buttons, text="打开导出目录", command=open_export_dir, style="Secondary.TButton").pack(side=tk.LEFT)
+
+    export_button = ttk.Button(action_buttons, text="开始导出 Excel", command=export_selected_files, style="Primary.TButton")
+    export_button.pack(side=tk.LEFT, padx=(8, 0))
+
+    footer_label = ttk.Label(
+        main_frame,
+        text="支持重复添加文件、移除选中项，并可自定义导出目录。",
+        style="Footer.TLabel",
+    )
+    footer_label.grid(row=4, column=0, sticky="w", pady=(10, 0))
+
+    output_dir_var.trace_add("write", lambda *_args: update_output_hint())
+    update_output_hint()
+    refresh_file_list()
+
+    root.mainloop()
+    return 0
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="将 Markdown 表格批量导出到 Excel。")
     parser.add_argument("files", nargs="*", help="可选：直接传入一个或多个 Markdown 文件路径。")
@@ -1279,6 +1551,9 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    if not args.files and not args.output:
+        return run_desktop_ui()
+
     selected_files = [str(Path(file).resolve()) for file in args.files] if args.files else select_markdown_files()
 
     if not selected_files:
