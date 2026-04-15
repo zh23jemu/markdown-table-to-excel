@@ -16,8 +16,35 @@ SEPARATOR_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*$"
 BR_TAG_RE = re.compile(r"<br\s*/?>", re.IGNORECASE)
 AGE_TOKEN_RE = re.compile(r"^(?:約)?[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]+(?:歲|月|日|具)?$")
 AGE_PREFIX_RE = re.compile(r"^((?:約)?(?:[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]*歲|[零一二三四五六七八九十百千廿卅卌半元兩二三四五六七八九十\d]+(?:月|日|具)))(.+)$")
-DATE_LIKE_RE = re.compile(r"[一二三四五六七八九十廿卅卌元\d]+月|[一二三四五六七八九十廿卅卌元\d]+日|又月又日|初[一二三四五六七八九十\d]")
-ADDRESS_KEYWORDS = ("方便所", "福音堂", "福音医院", "福音醫院", "醫院", "医院", "街", "里", "巷", "路", "橋", "桥", "碼頭", "码头", "祠", "院", "棧", "栈", "埠頭", "碼頭水")
+DATE_LIKE_RE = re.compile(
+    r"[一二三四五六七八九十廿卅卌元\d]+月|[一二三四五六七八九十廿卅卌元\d]+日|又月又日|初[一二三四五六七八九十\d]|[Xx×✕]\s*月\s*[Xx×✕]\s*日"
+)
+ADDRESS_KEYWORDS = (
+    "方便所",
+    "福音堂",
+    "福音医院",
+    "福音醫院",
+    "醫院",
+    "医院",
+    "街",
+    "里",
+    "巷",
+    "路",
+    "橋",
+    "桥",
+    "碼頭",
+    "码头",
+    "祠",
+    "院",
+    "棧",
+    "栈",
+    "埠頭",
+    "碼頭水",
+    "飯店",
+    "坪",
+    "池",
+    "旗杆",
+)
 ORIGIN_SUFFIXES = ("縣", "县", "州", "鄉", "乡", "埠", "門", "门", "海", "浦", "寧", "宁", "甯", "陽", "阳", "溪", "島", "岛", "山", "岡", "冈", "口")
 
 
@@ -27,6 +54,36 @@ class TableBlock:
     table_number: int
     headers: list[str]
     rows: list[list[str]]
+
+
+HEADER_MERGE_GROUPS = (
+    ("姓", "名"),
+    ("性", "別"),
+    ("年", "齡"),
+    ("籍", "貫"),
+    ("住", "址"),
+    ("病", "狀"),
+    ("認", "家"),
+    ("死", "亡", "日", "期"),
+    ("附", "記"),
+    ("棺木", "仙衣", "類別"),
+)
+
+COFFIN_SUFFIXES = (
+    "衣棺",
+    "厚仔",
+    "幫工",
+    "帮工",
+    "棺木",
+    "棺工",
+    "厚衣",
+    "金箱",
+    "金口相",
+    "木",
+    "棺",
+    "工",
+    "仔",
+)
 
 
 def normalize_cell(text: str) -> str:
@@ -100,6 +157,8 @@ def parse_markdown_tables(path: str | Path) -> list[TableBlock]:
                 rows.append(row)
                 index += 1
 
+            headers, rows = merge_split_header_columns(headers, rows)
+
             tables.append(
                 TableBlock(
                     title=title or file_path.stem,
@@ -123,6 +182,51 @@ def parse_markdown_tables(path: str | Path) -> list[TableBlock]:
         index += 1
 
     return tables
+
+
+def merge_cells(values: list[str]) -> str:
+    return "".join(value.strip() for value in values if value and value.strip())
+
+
+def merge_split_header_columns(headers: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    normalized_headers = headers[:]
+    normalized_rows = [row[:] for row in rows]
+    column_index = 0
+
+    while column_index < len(normalized_headers):
+        matched_group: tuple[str, ...] | None = None
+        for group in HEADER_MERGE_GROUPS:
+            group_length = len(group)
+            if tuple(normalized_headers[column_index:column_index + group_length]) == group:
+                matched_group = group
+                break
+
+        if not matched_group:
+            column_index += 1
+            continue
+
+        group_length = len(matched_group)
+        merged_header = "".join(matched_group)
+        normalized_headers = (
+            normalized_headers[:column_index]
+            + [merged_header]
+            + normalized_headers[column_index + group_length:]
+        )
+
+        merged_rows: list[list[str]] = []
+        for row in normalized_rows:
+            padded_row = row + [""] * (column_index + group_length - len(row))
+            merged_value = merge_cells(padded_row[column_index:column_index + group_length])
+            merged_row = (
+                padded_row[:column_index]
+                + [merged_value]
+                + padded_row[column_index + group_length:]
+            )
+            merged_rows.append(merged_row)
+        normalized_rows = merged_rows
+        column_index += 1
+
+    return normalized_headers, normalized_rows
 
 
 def split_br_delimited_cells(row: list[str], expected_width: int) -> list[str]:
@@ -175,8 +279,52 @@ def is_age_like(value: str) -> bool:
     return bool(AGE_TOKEN_RE.fullmatch(stripped))
 
 
+def normalize_age_text(value: str) -> str:
+    stripped = value.strip()
+    if stripped.startswith("空"):
+        candidate = stripped[1:].strip()
+        if candidate and ("歲" in candidate or "岁" in candidate):
+            return candidate
+    return stripped
+
+
+def is_age_marker_like(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    if stripped in {"歲", "岁"}:
+        return True
+    if is_age_like(stripped):
+        return True
+    return bool(re.fullmatch(r"(?:約)?[天夭零一二三四五六七八九十百千廿卅卌半元兩\d]*[歲岁]", stripped))
+
+
+def split_gender_and_age(value: str) -> tuple[str, str] | None:
+    stripped = normalize_age_text(value)
+    if not stripped:
+        return None
+
+    match = re.fullmatch(r"([男女])(.+)", stripped)
+    if not match:
+        return None
+
+    gender_part = match.group(1)
+    age_part = match.group(2).strip()
+    if not is_age_marker_like(age_part):
+        return None
+
+    return gender_part, age_part
+
+
+def is_age_fragment(value: str) -> bool:
+    stripped = value.strip()
+    if not stripped:
+        return False
+    return bool(re.fullmatch(r"[零一二三四五六七八九十百千廿卅卌半元兩\d]+", stripped))
+
+
 def split_age_and_origin(age_value: str) -> tuple[str, str] | None:
-    stripped = age_value.strip()
+    stripped = normalize_age_text(age_value)
     if not stripped:
         return None
 
@@ -215,6 +363,137 @@ def is_address_like(value: str) -> bool:
     return any(keyword in stripped for keyword in ADDRESS_KEYWORDS)
 
 
+def extract_coffin_suffix(value: str) -> tuple[str, str]:
+    stripped = value.strip()
+    if not stripped:
+        return "", ""
+
+    for suffix in COFFIN_SUFFIXES:
+        if stripped.endswith(suffix):
+            return stripped[:-len(suffix)], suffix
+    return stripped, ""
+
+
+def split_compact_tail_fields(value: str) -> tuple[str, str, str, str] | None:
+    stripped = value.strip()
+    if not stripped:
+        return None
+
+    remainder, coffin = extract_coffin_suffix(stripped)
+    if not coffin:
+        return None
+
+    family = ""
+    death = ""
+    grave = ""
+
+    if remainder.startswith("又日"):
+        death = "又月又日"
+        grave = remainder[len("又日"):].strip()
+    else:
+        full_date_match = re.search(
+            r"^(?P<family>.*?)(?P<death>[又元一二三四五六七八九十廿卅卌Xx×✕]*月[又元一二三四五六七八九十廿卅卌Xx×✕]*日)(?P<grave>.+)$",
+            remainder,
+        )
+        if full_date_match:
+            family = full_date_match.group("family").strip()
+            death = full_date_match.group("death").strip()
+            grave = full_date_match.group("grave").strip()
+
+    if not death or not grave:
+        return None
+
+    if death in {"月又日", "月又日".replace(" ", "")}:
+        death = "又月又日"
+    elif death.startswith("月"):
+        death = f"又{death}"
+
+    if family and family[-1] in "一二三四五六七八九十廿卅卌元":
+        if death and death[0] != family[-1]:
+            death = family[-1] + death
+            family = family[:-1].strip()
+
+    return family, death, grave, coffin
+
+
+def normalize_compact_obituary_row(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+    family_index = find_header_index(headers, ("認家", "认家"))
+    death_index = find_header_index(headers, ("死亡日期",))
+    grave_index = find_header_index(headers, ("墓地號數", "墓地号数"))
+    coffin_index = find_header_index(headers, ("棺木",))
+
+    required_indexes = (age_index, origin_index, address_index, illness_index, family_index, death_index, grave_index, coffin_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    if age_index is not None:
+        normalized_row[age_index] = normalize_age_text(normalized_row[age_index])
+        age_and_origin = split_age_and_origin(normalized_row[age_index])
+        if age_and_origin:
+            if normalized_row[origin_index].strip():
+                normalized_row = shift_row_segment_right(normalized_row, origin_index)
+            normalized_row[age_index], normalized_row[origin_index] = age_and_origin
+
+    family_seed = ""
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    illness_value = normalized_row[illness_index].strip()
+    if address_value.endswith("月") and illness_value in {"又日", "月四"}:
+        family_seed = address_value[:-1].strip()
+        if origin_value and is_address_like(origin_value):
+            normalized_row[address_index] = origin_value
+            normalized_row[origin_index] = ""
+        else:
+            normalized_row[address_index] = ""
+
+    tail_source = "".join(
+        normalized_row[index].strip()
+        for index in range(illness_index, coffin_index + 1)
+        if normalized_row[index].strip()
+    )
+    compact_tail = split_compact_tail_fields(tail_source)
+    if not compact_tail:
+        return normalized_row
+
+    family_value, death_value, grave_value, coffin_value = compact_tail
+    normalized_row[illness_index] = ""
+    normalized_row[family_index] = family_value or family_seed
+    normalized_row[death_index] = death_value
+    normalized_row[grave_index] = grave_value
+    normalized_row[coffin_index] = coffin_value
+
+    for index in range(coffin_index + 1, len(normalized_row)):
+        if index > coffin_index:
+            normalized_row[index] = ""
+
+    return normalized_row
+
+
+def shift_row_segment_right(row: list[str], start_index: int) -> list[str]:
+    normalized_row = row[:]
+    non_empty_indexes = [index for index, value in enumerate(normalized_row) if value.strip()]
+    if not non_empty_indexes:
+        return normalized_row
+
+    last_non_empty_index = non_empty_indexes[-1]
+    if last_non_empty_index >= len(normalized_row) - 1:
+        return normalized_row
+
+    for index in range(last_non_empty_index + 1, start_index, -1):
+        normalized_row[index] = normalized_row[index - 1]
+    normalized_row[start_index] = ""
+    return normalized_row
+
+
 def shift_misaligned_identity_block(headers: list[str], row: list[str]) -> list[str]:
     normalized_row = row[:]
     gender_index = find_header_index(headers, ("性別", "性"))
@@ -241,11 +520,9 @@ def shift_misaligned_identity_block(headers: list[str], row: list[str]) -> list[
     family_value = normalized_row[family_index].strip()
     death_value = normalized_row[death_index].strip()
 
-    if gender_value not in {"歲", "岁"}:
+    if not is_age_marker_like(gender_value):
         return normalized_row
-    if is_age_like(age_value):
-        return normalized_row
-    if not age_value:
+    if age_value and is_age_like(age_value):
         return normalized_row
     if address_value:
         return normalized_row
@@ -254,15 +531,7 @@ def shift_misaligned_identity_block(headers: list[str], row: list[str]) -> list[
     if death_value and is_date_like(death_value):
         return normalized_row
 
-    shifted_row = normalized_row[:]
-    shifted_row[death_index] = family_value
-    shifted_row[family_index] = illness_value
-    shifted_row[illness_index] = address_value
-    shifted_row[address_index] = origin_value
-    shifted_row[origin_index] = age_value
-    shifted_row[age_index] = gender_value
-    shifted_row[gender_index] = ""
-    return shifted_row
+    return shift_row_segment_right(normalized_row, gender_index)
 
 
 def shift_place_fields_right(headers: list[str], row: list[str]) -> list[str]:
@@ -307,7 +576,73 @@ def shift_place_fields_right(headers: list[str], row: list[str]) -> list[str]:
 
     moved_row = normalized_row[:]
     moved_row[address_index] = origin_value
+    moved_row[origin_index] = ""
     return moved_row
+
+
+def shift_age_origin_block_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+
+    required_indexes = (gender_index, age_index, origin_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+
+    if not is_age_marker_like(gender_value):
+        return normalized_row
+    if not age_value or is_age_like(age_value):
+        return normalized_row
+    if origin_value:
+        return normalized_row
+    if not is_origin_like(age_value):
+        return normalized_row
+
+    normalized_row[gender_index] = ""
+    normalized_row[age_index] = gender_value
+    normalized_row[origin_index] = age_value
+    return normalized_row
+
+
+def shift_gender_age_only_block(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+
+    if not is_age_marker_like(gender_value):
+        return normalized_row
+    if age_value or origin_value:
+        return normalized_row
+    if not address_value:
+        return normalized_row
+
+    normalized_row[gender_index] = ""
+    normalized_row[age_index] = gender_value
+    return normalized_row
 
 
 def normalize_identity_columns(headers: list[str], row: list[str]) -> list[str]:
@@ -337,6 +672,26 @@ def normalize_identity_columns(headers: list[str], row: list[str]) -> list[str]:
         gender_value = normalized_row[gender_index]
 
     if age_index is not None:
+        if is_age_fragment(gender_value) and age_value in {"歲", "岁"}:
+            combined_age = f"{gender_value}{age_value}"
+            if is_age_marker_like(combined_age):
+                normalized_row[gender_index] = ""
+                normalized_row[age_index] = combined_age
+                gender_value = normalized_row[gender_index]
+                age_value = normalized_row[age_index]
+
+        split_gender_age = split_gender_and_age(gender_value)
+        if split_gender_age and not age_value:
+            normalized_row[gender_index], normalized_row[age_index] = split_gender_age
+            gender_value = normalized_row[gender_index]
+            age_value = normalized_row[age_index]
+
+        if not age_value and is_age_marker_like(normalize_age_text(gender_value)):
+            normalized_row[age_index] = normalize_age_text(gender_value)
+            normalized_row[gender_index] = ""
+            gender_value = normalized_row[gender_index]
+            age_value = normalized_row[age_index]
+
         if has_gender_suffix and is_age_like(gender_value) and not age_value:
             normalized_row[name_index] = name_value[:-1].strip()
             normalized_row[gender_index] = name_value[-1]
@@ -365,14 +720,360 @@ def normalize_identity_columns(headers: list[str], row: list[str]) -> list[str]:
     return normalized_row
 
 
+def shift_gender_age_origin_block_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+
+    split_gender_age = split_gender_and_age(gender_value)
+    age_marker_value = split_gender_age[1] if split_gender_age else gender_value
+
+    if not is_age_marker_like(age_marker_value):
+        return normalized_row
+    if not age_value or not is_origin_like(age_value):
+        return normalized_row
+    if origin_value:
+        return normalized_row
+    if not address_value:
+        return normalized_row
+
+    shifted_row = shift_row_segment_right(normalized_row, age_index)
+    if split_gender_age:
+        shifted_row[gender_index], shifted_row[age_index] = split_gender_age
+    else:
+        shifted_row[gender_index] = ""
+        shifted_row[age_index] = gender_value
+    shifted_row[origin_index] = age_value
+    return shifted_row
+
+
+def shift_age_in_gender_to_origin(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+
+    split_gender_age = split_gender_and_age(gender_value)
+    age_marker_value = split_gender_age[1] if split_gender_age else normalize_age_text(gender_value)
+    if not is_age_marker_like(age_marker_value):
+        return normalized_row
+    if not age_value:
+        return normalized_row
+    if is_age_like(age_value) or is_address_like(age_value):
+        return normalized_row
+    if origin_value:
+        return normalized_row
+    if not address_value:
+        return normalized_row
+
+    if split_gender_age:
+        normalized_row[gender_index], normalized_row[age_index] = split_gender_age
+    else:
+        normalized_row[gender_index] = ""
+        normalized_row[age_index] = age_marker_value
+    normalized_row[origin_index] = age_value
+    return normalized_row
+
+
+def shift_front_identity_columns_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+    family_index = find_header_index(headers, ("認家", "认家"))
+    death_index = find_header_index(headers, ("死亡日期",))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index, illness_index, family_index, death_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    illness_value = normalized_row[illness_index].strip()
+    family_value = normalized_row[family_index].strip()
+    death_value = normalized_row[death_index].strip()
+
+    age_marker_value = normalize_age_text(gender_value)
+    if not is_age_marker_like(age_marker_value):
+        return normalized_row
+    if not age_value or is_age_like(age_value) or is_address_like(age_value):
+        return normalized_row
+
+    if origin_value and is_address_like(origin_value):
+        normalized_row[gender_index] = ""
+        normalized_row[age_index] = age_marker_value
+        normalized_row[origin_index] = age_value
+        normalized_row[address_index] = origin_value
+        return normalized_row
+
+    if (
+        origin_value
+        and address_value
+        and not is_address_like(address_value)
+        and not illness_value
+        and not family_value
+        and is_date_like(death_value)
+    ):
+        normalized_row[gender_index] = ""
+        normalized_row[age_index] = age_marker_value
+        normalized_row[origin_index] = age_value
+        normalized_row[address_index] = origin_value
+        normalized_row[family_index] = address_value
+        return normalized_row
+
+    return normalized_row
+
+
+def shift_age_origin_address_triplet_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index, illness_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    illness_value = normalized_row[illness_index].strip()
+
+    split_gender_age = split_gender_and_age(gender_value)
+    age_marker_value = split_gender_age[1] if split_gender_age else normalize_age_text(gender_value)
+    if not is_age_marker_like(age_marker_value):
+        return normalized_row
+    if not age_value or is_age_like(age_value) or is_address_like(age_value):
+        return normalized_row
+    if not origin_value or not is_address_like(origin_value):
+        return normalized_row
+    if address_value:
+        return normalized_row
+    if not illness_value:
+        return normalized_row
+
+    normalized_row[gender_index] = split_gender_age[0] if split_gender_age else ""
+    normalized_row[age_index] = age_marker_value
+    normalized_row[origin_index] = age_value
+    normalized_row[address_index] = origin_value
+    return normalized_row
+
+
+def shift_split_gender_age_block_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+    family_index = find_header_index(headers, ("認家", "认家"))
+    death_index = find_header_index(headers, ("死亡日期",))
+    grave_index = find_header_index(headers, ("墓地號數", "墓地号数"))
+    coffin_index = find_header_index(headers, ("棺木", "類別", "类别"))
+
+    required_indexes = (gender_index, age_index, origin_index, address_index, illness_index, family_index, death_index, grave_index, coffin_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    illness_value = normalized_row[illness_index].strip()
+    family_value = normalized_row[family_index].strip()
+    death_value = normalized_row[death_index].strip()
+    grave_value = normalized_row[grave_index].strip()
+
+    split_gender_age = split_gender_and_age(gender_value)
+    if not split_gender_age:
+        return normalized_row
+    if not is_origin_like(age_value):
+        return normalized_row
+    if not origin_value or not is_address_like(origin_value):
+        return normalized_row
+    if address_value:
+        return normalized_row
+    if not illness_value:
+        return normalized_row
+    if not is_date_like(family_value):
+        return normalized_row
+    if not death_value or not grave_value:
+        return normalized_row
+
+    shifted_row = shift_row_segment_right(normalized_row, age_index)
+    shifted_row[gender_index], shifted_row[age_index] = split_gender_age
+    return shifted_row
+
+
+def shift_full_identity_chain_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    gender_index = find_header_index(headers, ("性別", "性"))
+    age_index = find_header_index(headers, ("年齡", "年龄"))
+    origin_index = find_header_index(headers, ("籍貫", "籍贯"))
+    address_index = find_header_index(headers, ("住址",))
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+    family_index = find_header_index(headers, ("認家", "认家"))
+    death_index = find_header_index(headers, ("死亡日期",))
+    grave_index = find_header_index(headers, ("墓地號數", "墓地号数"))
+    coffin_index = find_header_index(headers, ("棺木", "類別", "类别"))
+
+    required_indexes = (
+        gender_index,
+        age_index,
+        origin_index,
+        address_index,
+        illness_index,
+        family_index,
+        death_index,
+        grave_index,
+        coffin_index,
+    )
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    gender_value = normalized_row[gender_index].strip()
+    age_value = normalized_row[age_index].strip()
+    origin_value = normalized_row[origin_index].strip()
+    address_value = normalized_row[address_index].strip()
+    illness_value = normalized_row[illness_index].strip()
+    family_value = normalized_row[family_index].strip()
+    death_value = normalized_row[death_index].strip()
+    grave_value = normalized_row[grave_index].strip()
+
+    age_marker_value = normalize_age_text(gender_value)
+    if not is_age_marker_like(age_marker_value):
+        return normalized_row
+    if not age_value or is_age_like(age_value) or is_address_like(age_value):
+        return normalized_row
+    if not origin_value or not is_address_like(origin_value):
+        return normalized_row
+    if address_value:
+        return normalized_row
+    if not illness_value:
+        return normalized_row
+    if not family_value or not is_date_like(family_value):
+        return normalized_row
+    if not death_value or not grave_value:
+        return normalized_row
+
+    shifted_row = shift_row_segment_right(normalized_row, gender_index)
+    shifted_row[gender_index] = ""
+    shifted_row[age_index] = age_marker_value
+    return shifted_row
+
+
+def shift_tail_fields_right(headers: list[str], row: list[str]) -> list[str]:
+    normalized_row = row[:]
+    illness_index = find_header_index(headers, ("病狀", "病状"))
+    family_index = find_header_index(headers, ("認家", "认家"))
+    death_index = find_header_index(headers, ("死亡日期",))
+    grave_index = find_header_index(headers, ("墓地號數", "墓地号数"))
+    coffin_index = find_header_index(headers, ("棺木", "類別", "类别"))
+
+    required_indexes = (illness_index, family_index, death_index, grave_index, coffin_index)
+    if any(index is None for index in required_indexes):
+        return normalized_row
+
+    max_index = max(index for index in required_indexes if index is not None)
+    if len(normalized_row) <= max_index:
+        normalized_row.extend([""] * (max_index + 1 - len(normalized_row)))
+
+    illness_value = normalized_row[illness_index].strip()
+    family_value = normalized_row[family_index].strip()
+    death_value = normalized_row[death_index].strip()
+    grave_value = normalized_row[grave_index].strip()
+    coffin_value = normalized_row[coffin_index].strip()
+
+    if not illness_value:
+        return normalized_row
+    if not family_value or not is_date_like(family_value):
+        return normalized_row
+    if not death_value:
+        return normalized_row
+    if not grave_value:
+        return normalized_row
+    if coffin_value:
+        return normalized_row
+
+    normalized_row[coffin_index] = grave_value
+    normalized_row[grave_index] = death_value
+    normalized_row[death_index] = family_value
+    normalized_row[family_index] = illness_value
+    normalized_row[illness_index] = ""
+    return normalized_row
+
+
 def normalize_row_break_separators(headers: list[str], rows: list[list[str]]) -> list[list[str]]:
     expected_width = len(headers)
     normalized_rows: list[list[str]] = []
     for row in rows:
         normalized_row = split_br_delimited_cells(row, expected_width)
         normalized_row = normalize_identity_columns(headers, normalized_row)
+        normalized_row = shift_age_in_gender_to_origin(headers, normalized_row)
+        normalized_row = shift_age_origin_address_triplet_right(headers, normalized_row)
+        normalized_row = shift_front_identity_columns_right(headers, normalized_row)
+        normalized_row = shift_full_identity_chain_right(headers, normalized_row)
+        normalized_row = shift_tail_fields_right(headers, normalized_row)
+        normalized_row = shift_split_gender_age_block_right(headers, normalized_row)
+        normalized_row = shift_gender_age_origin_block_right(headers, normalized_row)
+        normalized_row = shift_age_origin_block_right(headers, normalized_row)
+        normalized_row = shift_gender_age_only_block(headers, normalized_row)
         normalized_row = shift_misaligned_identity_block(headers, normalized_row)
         normalized_row = shift_place_fields_right(headers, normalized_row)
+        normalized_row = normalize_compact_obituary_row(headers, normalized_row)
+        normalized_row = normalize_identity_columns(headers, normalized_row)
         normalized_rows.append(normalized_row)
     return normalized_rows
 
