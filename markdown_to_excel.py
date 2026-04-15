@@ -69,6 +69,17 @@ HEADER_MERGE_GROUPS = (
     ("棺木", "仙衣", "類別"),
 )
 
+MATRIX_TRANSPOSE_ROW_HEADERS = (
+    "籍貫",
+    "住址",
+    "病狀",
+    "死亡日期",
+    "墓地隴名",
+    "墓地號數",
+    "棺木類別",
+    "關係人",
+)
+
 COFFIN_SUFFIXES = (
     "衣棺",
     "厚仔",
@@ -158,6 +169,8 @@ def parse_markdown_tables(path: str | Path) -> list[TableBlock]:
                 index += 1
 
             headers, rows = merge_split_header_columns(headers, rows)
+            if should_transpose_matrix_table(headers, rows):
+                headers, rows = transpose_matrix_table(headers, rows)
 
             tables.append(
                 TableBlock(
@@ -186,6 +199,79 @@ def parse_markdown_tables(path: str | Path) -> list[TableBlock]:
 
 def merge_cells(values: list[str]) -> str:
     return "".join(value.strip() for value in values if value and value.strip())
+
+
+def should_transpose_matrix_table(headers: list[str], rows: list[list[str]]) -> bool:
+    normalized_headers = [header.strip() for header in headers]
+    if any(normalized_headers):
+        return False
+    if len(headers) < 6 or len(rows) < 4:
+        return False
+    if len(headers) <= len(rows):
+        return False
+
+    first_row = rows[0] if rows else []
+    non_empty_first_row = sum(1 for cell in first_row if cell.strip())
+    multiline_cells = sum(1 for cell in first_row if "<br" in cell.lower())
+
+    if non_empty_first_row < max(4, int(len(first_row) * 0.6)):
+        return False
+    if multiline_cells < max(3, int(len(first_row) * 0.5)):
+        return False
+
+    return True
+
+
+def transpose_matrix_table(headers: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
+    max_columns = max([len(headers)] + [len(row) for row in rows])
+    padded_rows = [row + [""] * (max_columns - len(row)) for row in rows]
+
+    transposed_headers = ["姓名", "性別", "年齡"]
+    for index in range(1, len(padded_rows)):
+        if index - 1 < len(MATRIX_TRANSPOSE_ROW_HEADERS):
+            transposed_headers.append(MATRIX_TRANSPOSE_ROW_HEADERS[index - 1])
+        else:
+            transposed_headers.append(f"字段{index + 3}")
+
+    transposed_rows: list[list[str]] = []
+    for column_index in range(max_columns):
+        first_cell = padded_rows[0][column_index].strip()
+        if not first_cell:
+            continue
+
+        segments = [segment.strip() for segment in BR_TAG_RE.split(first_cell) if segment.strip()]
+        if len(segments) >= 3 and segments[1] in {"男", "女"} and is_age_like(segments[2]):
+            row_values = [segments[0], segments[1], segments[2]]
+            first_extra = "<br>".join(segments[3:]) if len(segments) > 3 else ""
+        else:
+            row_values = [first_cell, "", ""]
+            first_extra = ""
+
+        for row_index in range(1, len(padded_rows)):
+            value = padded_rows[row_index][column_index].strip()
+            if row_index == 1 and first_extra:
+                value = f"{first_extra}<br>{value}" if value else first_extra
+            row_values.append(value)
+
+        if len(row_values) > 3:
+            location_value = row_values[3].strip()
+            origin_part = ""
+            address_part = location_value
+            for split_index in range(1, len(location_value)):
+                left = location_value[:split_index].strip()
+                right = location_value[split_index:].strip()
+                if not left or not right:
+                    continue
+                if is_origin_like(left) and is_address_like(right):
+                    origin_part = left
+                    address_part = right
+                    break
+            row_values[3] = origin_part
+            row_values.insert(4, address_part)
+
+        transposed_rows.append(row_values)
+
+    return transposed_headers, transposed_rows
 
 
 def merge_split_header_columns(headers: list[str], rows: list[list[str]]) -> tuple[list[str], list[list[str]]]:
