@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -55,6 +56,12 @@ class TableBlock:
     table_number: int
     headers: list[str]
     rows: list[list[str]]
+
+
+def get_application_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
 
 
 HEADER_MERGE_GROUPS = (
@@ -1253,6 +1260,33 @@ def export_tables_to_workbook(parsed_files: list[tuple[Path, list[TableBlock]]],
     return str(output_path)
 
 
+def export_single_markdown_to_workbook(file_path: Path, tables: list[TableBlock], output_dir: Path) -> str:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = sanitize_sheet_name(file_path.stem, set())
+
+    if not tables:
+        worksheet.cell(row=1, column=1, value=f"{file_path.name} 中未找到 Markdown 表格。")
+        worksheet.cell(row=1, column=1).font = Font(bold=True)
+        auto_adjust_columns(worksheet)
+    else:
+        current_row = 1
+        for table in tables:
+            table.rows = normalize_row_break_separators(table.headers, table.rows)
+            current_row = write_table_to_sheet(worksheet, current_row, table)
+        auto_adjust_columns(worksheet)
+
+    output_path = build_output_path(output_dir, f"{file_path.stem}.xlsx")
+    workbook.save(output_path)
+    return str(output_path)
+
+
+def export_markdown_files_to_excels(parsed_files: list[tuple[Path, list[TableBlock]]], output_dir: str | Path) -> list[str]:
+    target_dir = Path(output_dir)
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return [export_single_markdown_to_workbook(file_path, tables, target_dir) for file_path, tables in parsed_files]
+
+
 def select_markdown_files() -> list[str]:
     import tkinter as tk
     from tkinter import filedialog
@@ -1273,7 +1307,7 @@ def run_desktop_ui() -> int:
     import tkinter.font as tkfont
     from tkinter import filedialog, messagebox, ttk
 
-    project_dir = Path(__file__).resolve().parent
+    project_dir = get_application_dir()
     selected_files: list[str] = []
     last_output_path: Path | None = None
 
@@ -1323,10 +1357,6 @@ def run_desktop_ui() -> int:
             output_dir_var.set(resolved_dir)
             update_output_hint()
 
-    def reset_output_dir() -> None:
-        output_dir_var.set("")
-        update_output_hint()
-
     def open_export_dir() -> None:
         export_dir = get_export_dir()
         export_dir.mkdir(parents=True, exist_ok=True)
@@ -1356,14 +1386,11 @@ def run_desktop_ui() -> int:
                 parsed_files.append((file_path, parse_markdown_tables(file_path)))
 
             export_dir = get_export_dir()
-            output_path = build_output_path(export_dir)
-            result = export_tables_to_workbook(parsed_files, output_path)
-            last_output_path = Path(result)
-            status_var.set(f"导出完成：{result}")
-            latest_file_var.set(f"最近导出：{result}")
-            if auto_open_var.get() and last_output_path.exists():
-                os.startfile(str(last_output_path))
-            messagebox.showinfo("导出完成", f"Excel 文件已生成：\n{result}")
+            results = export_markdown_files_to_excels(parsed_files, export_dir)
+            last_output_path = Path(results[-1]) if results else None
+            status_var.set(f"导出完成：共生成 {len(results)} 个 Excel 文件")
+            latest_file_var.set(f"最近导出：{results[-1] if results else '无'}")
+            messagebox.showinfo("导出完成", "Excel 文件已生成：\n" + "\n".join(results))
         except Exception as exc:
             status_var.set(f"导出失败：{exc}")
             messagebox.showerror("导出失败", str(exc))
@@ -1408,7 +1435,6 @@ def run_desktop_ui() -> int:
     latest_file_var = tk.StringVar(value="最近导出：尚未导出文件")
     file_tip_var = tk.StringVar(value="请选择一个或多个 Markdown 文件。")
     status_var = tk.StringVar(value="准备就绪")
-    auto_open_var = tk.BooleanVar(value=False)
 
     main_frame = ttk.Frame(root, padding=16, style="App.TFrame")
     main_frame.pack(fill=tk.BOTH, expand=True)
@@ -1497,14 +1523,6 @@ def run_desktop_ui() -> int:
     export_dir_label.grid(row=0, column=1, sticky="ew")
 
     ttk.Button(export_dir_frame, text="选择目录", command=choose_output_dir, style="Secondary.TButton").grid(row=0, column=2, padx=(8, 0))
-    ttk.Button(export_dir_frame, text="使用默认目录", command=reset_output_dir, style="Secondary.TButton").grid(row=0, column=3, padx=(8, 0))
-
-    auto_open_check = ttk.Checkbutton(
-        export_dir_frame,
-        text="导出完成后自动打开 Excel 文件",
-        variable=auto_open_var,
-    )
-    auto_open_check.grid(row=1, column=0, columnspan=4, sticky="w", pady=(10, 0))
 
     action_frame = ttk.Frame(main_frame, padding=(12, 10), style="Card.TFrame")
     action_frame.grid(row=3, column=0, sticky="ew", pady=(6, 0))
@@ -1542,10 +1560,7 @@ def run_desktop_ui() -> int:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="将 Markdown 表格批量导出到 Excel。")
     parser.add_argument("files", nargs="*", help="可选：直接传入一个或多个 Markdown 文件路径。")
-    parser.add_argument(
-        "--output",
-        help="可选：指定输出 Excel 文件路径；不传时默认输出到项目目录。",
-    )
+    parser.add_argument("--output", help="可选：指定输出目录；不传时默认输出到项目目录。")
     return parser.parse_args()
 
 
@@ -1565,10 +1580,12 @@ def main() -> int:
         file_path = Path(file_name)
         parsed_files.append((file_path, parse_markdown_tables(file_path)))
 
-    project_dir = Path(__file__).resolve().parent
-    output_path = Path(args.output).resolve() if args.output else build_output_path(project_dir)
-    result = export_tables_to_workbook(parsed_files, output_path)
-    print(f"导出完成：{result}")
+    project_dir = get_application_dir()
+    output_dir = Path(args.output).resolve() if args.output else project_dir
+    results = export_markdown_files_to_excels(parsed_files, output_dir)
+    print("导出完成：")
+    for result in results:
+        print(result)
     return 0
 
 
